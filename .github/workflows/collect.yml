@@ -29,6 +29,7 @@ jobs:
         run: |
           npm test
           google-chrome --version
+          node browser-smoke.mjs
       - name: Execute verified private bundle
         env:
           COLLECTOR_BOOTSTRAP_URL: ${{ secrets.COLLECTOR_BOOTSTRAP_URL }}

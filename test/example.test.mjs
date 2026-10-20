@@ -137,3 +137,25 @@ test('all non-404 read failures, update failures and malformed existing records 
  const raw=await invokeMaintenance(async()=>{throw Error('synthetic-sensitive-error');});assert.deepEqual(raw.stderr,['maintenance_failed']);assert.deepEqual(raw.stdout,[]);
  const missing=await invokeMaintenance(()=>assert.fail('API called without GitHub token'),{token:null});assert.equal(missing.exitCode,1);assert.equal(missing.calls.length,0);
 });
+
+test('browser preflight uses only pinned CLI, fixed session and about:blank before Secrets',async()=>{
+ const {smokeArgs,browserSmoke}=await import('../browser-smoke.mjs');const calls=[];
+ await browserSmoke({command:async args=>{calls.push(args);return {status:0,stdout:JSON.stringify(args[0]==='run-code'?{result:{url:'about:blank'}}:{})};}});
+ assert.deepEqual(calls.map(args=>args[0]),['open','run-code','close']);assert.deepEqual(calls[0],['open','about:blank','--browser','chrome']);assert.ok(calls[1][1].includes('document.URL'));assert.deepEqual(smokeArgs(['close']),['--yes','--package','@playwright/cli@0.1.22','playwright-cli','-s=runner-preflight','--json','close']);
+ const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');const [before,execute]=y.split('      - name: Execute verified private bundle');assert.match(before,/node browser-smoke.mjs/);assert.ok(!before.includes('secrets.'));assert.ok(execute.includes('secrets.COLLECTOR_TOKEN'));
+});
+test('browser preflight closes after open failure and retains first command diagnostics',async()=>{
+ const {browserSmoke}=await import('../browser-smoke.mjs');const calls=[];
+ await assert.rejects(browserSmoke({command:async args=>{calls.push(args[0]);return args[0]==='open'?{status:1,stdout:'synthetic-open-output',stderr:'synthetic-first-browser-error'}:{status:1,stdout:'synthetic-close-failure'};}}),error=>error.message.includes('synthetic-first-browser-error')&&error.message.includes('synthetic-open-output')&&!error.message.includes('synthetic-close-failure'));
+ assert.deepEqual(calls,['open','close']);
+});
+test('browser preflight closes after evaluation or parsing failure and reports close-only errors',async()=>{
+ const {browserSmoke}=await import('../browser-smoke.mjs');
+ for(const mode of ['evaluation','parse','mismatch','close']){
+  const calls=[];await assert.rejects(browserSmoke({command:async args=>{calls.push(args[0]);if(args[0]==='run-code'){if(mode==='evaluation')return {status:1,stderr:'synthetic-evaluation-error'};if(mode==='parse')return {status:0,stdout:'not-json'};return {status:0,stdout:JSON.stringify({result:{url:mode==='mismatch'?'invalid':'about:blank'}})};}if(args[0]==='close'&&mode==='close')return {status:1,stderr:'synthetic-close-error'};return {status:0,stdout:'{}'};}}));assert.deepEqual(calls,['open','run-code','close']);
+ }
+});
+test('browser preflight supports JSON-encoded document results and spawn failures',async()=>{
+ const {browserSmoke}=await import('../browser-smoke.mjs');await browserSmoke({command:async args=>({status:0,stdout:JSON.stringify(args[0]==='run-code'?{result:JSON.stringify({url:'about:blank'})}:{})})});
+ const calls=[];await assert.rejects(browserSmoke({command:async args=>{calls.push(args[0]);return args[0]==='open'?{status:null,error:Error('synthetic-spawn-error')}:{status:0,stdout:'{}'};}}),/synthetic-spawn-error/);assert.deepEqual(calls,['open','close']);
+});
