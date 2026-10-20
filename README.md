@@ -14,12 +14,12 @@ Node.js 22 이상과 표준 Ubuntu 환경을 사용한다. npm 설치 의존성�
 
 세 Secret은 실제 실행 단계에만 주입한다. checkout·테스트에는 전달하지 않는다. 주소·토큰·해시를 workflow 입력이나 공개 파일에 적지 않는다. Actions variable `COLLECTION_ENABLED`가 문자열 `true`일 때만 실행하며 기본은 비활성이다. 중지하려면 이 변수를 제거하거나 `false`로 바꾼다.
 
-매일 UTC 00:17·06:17·12:17·18:17에 예약하며 GitHub 사정에 따라 지연·누락될 수 있다. 수동 실행 입력은 `max_navigations` 하나이며 1~300, 기본 300이다. 대상 이름을 입력하는 기능은 제공하지 않는다. 동시 실행은 한 개이며 실행 중인 job을 자동 취소하지 않는다.
+매일 UTC 짝수 시각 00:17~22:17, 한국시간 홀수 시각 01:17~23:17에 **하루 12회** 예약하며 GitHub 사정에 따라 지연·누락될 수 있다. 수동 실행 입력은 `max_navigations` 하나이며 1~900, 기본 900이다. 대상 이름을 입력하는 기능은 제공하지 않는다. 동시 실행은 한 개이며 실행 중인 job을 자동 취소하지 않는다.
 
 ```sh
 npm test
 # 세 Secret이 안전한 실행 환경에 등록된 경우
-node runner.mjs --max-navigations 300
+node runner.mjs --max-navigations 900
 ```
 
 ## 예약 실행 유지
@@ -39,7 +39,7 @@ GitHub는 공개 저장소에 **60일 동안 활동이 없으면 예약 workflow
 ```js
 export async function execute({token, maxNavigations, runId}) {
   // 비공개 동작은 승인한 번들 안에서 수행
-  return {summary: {status: 'completed', navigations: 0}, exitCode: 0};
+  return {summary: {status: 'completed', navigations: 0, needsCatchUp: false}, exitCode: 0};
 }
 ```
 
@@ -52,15 +52,27 @@ export async function execute({token, maxNavigations, runId}) {
 자식이 반환한 결과도 그대로 출력하지 않는다. 다음 고정 필드에 대해 음수가 아닌 안전한 정수, boolean, 고정 상태만 허용한다.
 
 - 상태: `completed`, `attention_required`, `partial_failure`, 또는 검증 실패를 뜻하는 `failed`
-- 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`
-- boolean: `budgetReserved`, `timeBudgetExhausted`
-- `coverage`의 정수: `targetCount`, `fresh`, `stale`, `missingOrUnknown`, `checkedWithin14Days`, `neverAttempted`, `estimatedSweepPages`, `estimatedSweepDays`. boolean: `capacityInsufficient`
+- 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`, `remainingEligibleTargets`, `checkpointCount`
+- boolean: `budgetReserved`, `timeBudgetExhausted`, `sourceBackoffActive`, `needsCatchUp`
+- `coverage`의 정수: `targetCount`, `fresh`, `stale`, `missingOrUnknown`, `checkedWithin14Days`, `neverAttempted`, `estimatedSweepPages`, `estimatedSweepDays`, `dueSoon`, `overdue`, `remainingPages`, `remainingCapacity14Days`, `remainingDailyCapacity`, `pagesPerRun`, `scheduledRunsPerDay`, `backoffPastDeadline`. boolean: `capacityInsufficient`, `deadlineMissRisk`, `allTargetsChecked`, `allPricesFresh`
 
 실행 오류는 원문 대신 고정 `runner_failed`와 종료 코드 1로 표시한다. 유효한 번들 결과의 `exitCode:1`도 실패로 유지한다. 성공 상태는 번들의 개별 동작 성공 여부를 별도로 증명하지 않으므로 허용된 집계 수치를 함께 확인한다.
 
 성공·예외·시간 초과·처리 가능한 종료 신호에서 임시 파일을 정리한다. 자식 실행은 최대 110분, job 전체는 120분으로 제한한다. 강제 종료처럼 프로세스가 정리 코드를 실행할 수 없는 경우 임시 데이터 제거는 runner 환경의 수명에 따른다. artifact·cache·파일 업로드·push/PR 실행은 구성하지 않는다.
 
 이 방식은 **승인한 해시의 번들을 신뢰하는 실행 경계**다. 임의 악성 코드를 차단하는 sandbox나 서버 운영자·저장소 관리자·runner 관리자에 대한 비밀 보장으로 해석하면 안 된다. 번들의 접근 권한과 배포 검토는 비공개 운영 측에서 관리한다.
+
+## 미완료 대상 후속 실행
+
+실행기는 정제된 `needsCatchUp` boolean만 `GITHUB_OUTPUT`의 `needs_catch_up=true|false`로 전달한다. 누락 값·문자열·객체는 false로 취급한다. 수집 job 성공과 true 출력, 정확한 저장소, `COLLECTION_ENABLED=true`가 모두 충족되면 별도 follow-up job이 고정된 같은 workflow의 main 브랜치에 상한 900으로 **후속 실행을 한 번만 요청**한다. GitHub REST API 외의 주소나 대상 입력을 받지 않는다.
+
+후속 job에는 `actions: write`만 부여하고, 수집 Secret·checkout·번들을 전달하지 않는다. 수집 job은 `contents: read`, 월간 maintenance는 별도 `contents: write`를 유지한다. 후속 job은 최대 2분, 단일 API 요청은 15초로 제한하며 실패 원문과 응답 본문은 공개하지 않는다.
+
+새 실행도 미완료 상태라면 다시 후속 실행을 요청할 수 있다. **연속 실행 종료의 핵심은 비공개 번들이 강제하는 하루 최대 3,600페이지 예산**이다. 예산 소진·전체 접근 제한 대기·데이터 오류에는 번들이 `needsCatchUp:false`를 반환해야 한다. 공개 실행기 자체는 사이트별 예산과 재시도 상태를 판정하지 않으므로 승인 번들의 해당 정책을 검증해야 한다.
+
+후속 실행은 누락된 예약이나 미완료 작업을 보충하는 경로다. 현재 concurrency 설정은 같은 그룹에서 실행 중 1개와 대기 중 1개만 유지하며, 새 요청이 들어오면 기존 대기 실행을 교체할 수 있다. 실행 중인 작업은 취소하지 않는다. [GitHub 동시 실행 규칙](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency) 참조.
+
+`allTargetsChecked`는 모든 대상 확인 상태, `allPricesFresh`는 실제 가격 확보·유효 상태를 나타낸다. 두 값을 구분하고, 무응답·접근 제한·자료 부재가 있는데 모든 가격 확보를 보장하는 것으로 해석하지 않는다. 나머지 coverage 집계는 번들의 예산·진행 판단 결과이며 사이트 주소·품목별 결과를 공개하지 않는다.
 
 ## 실행 비용과 검증
 

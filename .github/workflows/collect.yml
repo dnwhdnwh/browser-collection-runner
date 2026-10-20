@@ -1,13 +1,13 @@
 name: Browser collection runner
 on:
   schedule:
-    - cron: '17 0,6,12,18 * * *'
+    - cron: '17 */2 * * *'
   workflow_dispatch:
     inputs:
       max_navigations:
-        description: 'Maximum navigations, 1-300'
+        description: 'Maximum navigations, 1-900'
         type: number
-        default: 300
+        default: 900
 permissions:
   contents: read
 concurrency:
@@ -15,6 +15,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   collect:
+    permissions:
+      contents: read
+    outputs:
+      needs_catch_up: ${{ steps.run.outputs.needs_catch_up }}
     if: github.repository == 'dnwhdnwh/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -31,9 +35,39 @@ jobs:
           google-chrome --version
           node browser-smoke.mjs
       - name: Execute verified private bundle
+        id: run
         env:
           COLLECTOR_BOOTSTRAP_URL: ${{ secrets.COLLECTOR_BOOTSTRAP_URL }}
           COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
           COLLECTOR_BUNDLE_SHA256: ${{ secrets.COLLECTOR_BUNDLE_SHA256 }}
           MAX_NAVIGATIONS: ${{ inputs.max_navigations }}
-        run: node runner.mjs --max-navigations "${MAX_NAVIGATIONS:-300}"
+        run: node runner.mjs --max-navigations "${MAX_NAVIGATIONS:-900}"
+  follow_up:
+    needs: collect
+    if: >-
+      ${{ needs.collect.result == 'success' && needs.collect.outputs.needs_catch_up == 'true' &&
+          github.repository == 'dnwhdnwh/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true' }}
+    permissions:
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Request one follow-up execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'NODE'
+          (async()=>{
+            const token=process.env.GH_TOKEN;
+            delete process.env.GH_TOKEN;
+            try{
+              if(!token)throw Error('follow_up_failed');
+              const response=await fetch('https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},redirect:'error',signal:AbortSignal.timeout(15000),body:JSON.stringify({ref:'main',inputs:{max_navigations:'900'}})});
+              if(![200,204].includes(response.status))throw Error('follow_up_failed');
+              console.log('follow_up_requested');
+            }catch{
+              console.error('follow_up_failed');
+              process.exitCode=1;
+            }
+          })();
+          NODE
