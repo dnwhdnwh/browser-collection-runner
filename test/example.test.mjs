@@ -105,3 +105,35 @@ test('handled termination signal stops execution and removes private files',asyn
   assert.equal(readyFound,true);child.kill('SIGTERM');const result=await exited;assert.equal(result.code,1);assert.equal(stdout.trim(),'safe_failure');assert.equal(stderr,'');assert.deepEqual(await readdir(tempParent),['ready']);
  }finally{child.kill('SIGTERM');}
 }));
+
+test('maintenance isolates write permission, monthly schedule and GitHub token from collection',async()=>{
+ const collect=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');
+ const maintenance=await readFile(new URL('../.github/workflows/maintenance.yml',import.meta.url),'utf8');
+ assert.match(collect,/permissions:\n  contents: read/);assert.ok(!collect.includes('contents: write'));
+ assert.match(maintenance,/permissions: \{\}/);assert.match(maintenance,/permissions:\n      contents: write/);assert.match(maintenance,/29 1 1 \* \*/);assert.match(maintenance,/timeout-minutes: 3/);assert.match(maintenance,/github.repository == 'dnwhdnwh\/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true'/);
+ assert.match(maintenance,/group: browser-collection-maintenance/);assert.match(maintenance,/cancel-in-progress: false/);assert.match(maintenance,/GH_TOKEN: \$\{\{ github.token \}\}/);
+ assert.ok(!/uses:|secrets\.|COLLECTOR_|upload-artifact|actions\/cache|pull_request|push:|inputs:/.test(maintenance));
+});
+async function invokeMaintenance(fetcher,{token='synthetic-github-token'}={}){
+ const workflow=await readFile(new URL('../.github/workflows/maintenance.yml',import.meta.url),'utf8');
+ const script=workflow.match(/node <<'NODE'\n([\s\S]*?)\n          NODE/)[1].split('\n').map(line=>line.slice(10)).join('\n');
+ const processState={env:token===null?{}:{GH_TOKEN:token}},stdout=[],stderr=[],calls=[];
+ const execute=new Function('fetch','process','console','AbortSignal','Buffer','return '+script);
+ await execute(async(url,options)=>{assert.equal(processState.env.GH_TOKEN,undefined);calls.push({url,options});return fetcher(url,options);},processState,{log:value=>stdout.push(value),error:value=>stderr.push(value)},AbortSignal,Buffer);
+ return {stdout,stderr,calls,exitCode:processState.exitCode||0};
+}
+test('first monthly record creates only public timestamp and schema on fixed main path',async()=>{
+ const result=await invokeMaintenance(async(url,options)=>options.method==='PUT'?{status:201}:{status:404});assert.equal(result.exitCode,0);assert.deepEqual(result.stdout,['maintenance_completed']);assert.deepEqual(result.stderr,[]);assert.equal(result.calls.length,2);
+ const [read,write]=result.calls;assert.equal(read.url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/contents/.github/maintenance.json?ref=main');assert.equal(write.url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/contents/.github/maintenance.json');assert.equal(read.options.redirect,'error');assert.equal(write.options.redirect,'error');
+ const body=JSON.parse(write.options.body),content=JSON.parse(Buffer.from(body.content,'base64').toString('utf8'));assert.equal(body.branch,'main');assert.equal(body.sha,undefined);assert.deepEqual(Object.keys(content).sort(),['maintainedAt','schemaVersion']);assert.equal(content.schemaVersion,1);assert.equal(new Date(content.maintainedAt).toISOString(),content.maintainedAt);assert.ok(!JSON.stringify(content).includes('synthetic-github-token'));
+});
+test('existing monthly record updates using its content SHA without copying old data',async()=>{
+ const sha='a'.repeat(40);const result=await invokeMaintenance(async(url,options)=>options.method==='PUT'?{status:200}:{status:200,json:async()=>({type:'file',path:'.github/maintenance.json',sha,content:'synthetic-old-private-data'})});assert.equal(result.exitCode,0);const body=JSON.parse(result.calls[1].options.body);assert.equal(body.sha,sha);assert.ok(!Buffer.from(body.content,'base64').toString('utf8').includes('synthetic-old-private-data'));
+});
+test('all non-404 read failures, update failures and malformed existing records fail safely',async()=>{
+ for(const status of [401,403,429,500]){const result=await invokeMaintenance(async()=>({status}));assert.equal(result.exitCode,1);assert.equal(result.calls.length,1);assert.deepEqual(result.stdout,[]);assert.deepEqual(result.stderr,['maintenance_failed']);}
+ for(const status of [400,401,403,404,409,429,500]){const result=await invokeMaintenance(async(url,options)=>({status:options.method==='PUT'?status:404}));assert.equal(result.exitCode,1);assert.deepEqual(result.stderr,['maintenance_failed']);}
+ for(const data of [{type:'dir',path:'.github/maintenance.json',sha:'a'.repeat(40)},{type:'file',path:'wrong',sha:'a'.repeat(40)},{type:'file',path:'.github/maintenance.json',sha:'wrong'}]){const result=await invokeMaintenance(async()=>({status:200,json:async()=>data}));assert.equal(result.exitCode,1);assert.equal(result.calls.length,1);}
+ const raw=await invokeMaintenance(async()=>{throw Error('synthetic-sensitive-error');});assert.deepEqual(raw.stderr,['maintenance_failed']);assert.deepEqual(raw.stdout,[]);
+ const missing=await invokeMaintenance(()=>assert.fail('API called without GitHub token'),{token:null});assert.equal(missing.exitCode,1);assert.equal(missing.calls.length,0);
+});

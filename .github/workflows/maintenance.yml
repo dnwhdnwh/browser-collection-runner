@@ -1,0 +1,46 @@
+name: Maintain scheduled workflow activity
+on:
+  schedule:
+    - cron: '29 1 1 * *'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: browser-collection-maintenance
+  cancel-in-progress: false
+jobs:
+  maintain:
+    if: github.repository == 'dnwhdnwh/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Update public maintenance timestamp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'NODE'
+          (async()=>{
+            const token=process.env.GH_TOKEN;
+            delete process.env.GH_TOKEN;
+            try{
+              if(!token)throw Error('maintenance_failed');
+              const url='https://api.github.com/repos/dnwhdnwh/browser-collection-runner/contents/.github/maintenance.json';
+              const headers={Authorization:'Bearer '+token,Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'};
+              const existing=await fetch(url+'?ref=main',{headers,redirect:'error',signal:AbortSignal.timeout(15000)});
+              let sha;
+              if(existing.status===200){
+                const data=await existing.json();
+                if(data.type!=='file'||data.path!=='.github/maintenance.json'||typeof data.sha!=='string'||!/^[a-f0-9]{40}$/.test(data.sha))throw Error('maintenance_failed');
+                sha=data.sha;
+              }else if(existing.status!==404)throw Error('maintenance_failed');
+              const content=Buffer.from(JSON.stringify({schemaVersion:1,maintainedAt:new Date().toISOString()})+'\n').toString('base64');
+              const response=await fetch(url,{method:'PUT',headers:{...headers,'Content-Type':'application/json'},redirect:'error',signal:AbortSignal.timeout(15000),body:JSON.stringify({branch:'main',message:'예약 실행 유지용 공개 시각 갱신\n\n내용:\n- 공개 유지 시각과 스키마 버전만 저장하는 월간 활동 기록 갱신',content,...(sha?{sha}:{})})});
+              if(![200,201].includes(response.status))throw Error('maintenance_failed');
+              console.log('maintenance_completed');
+            }catch{
+              console.error('maintenance_failed');
+              process.exitCode=1;
+            }
+          })();
+          NODE

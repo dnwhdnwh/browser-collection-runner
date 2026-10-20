@@ -22,6 +22,14 @@ npm test
 node runner.mjs --max-navigations 300
 ```
 
+## 예약 실행 유지
+
+GitHub는 공개 저장소에 **60일 동안 활동이 없으면 예약 workflow를 자동 중지**한다. 매월 1일 UTC 01:29, 한국시간 10:29에 별도 maintenance workflow가 `.github/maintenance.json`의 `schemaVersion`과 `maintainedAt`만 main 브랜치에 커밋해 활동을 유지한다. 수동 실행도 가능하며 별도 입력은 없다. [GitHub 예약 실행 규칙](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) 참조.
+
+쓰기 권한은 **maintenance job의 `contents: write`에만** 부여하고, 수집 workflow의 `contents: read`는 유지한다. checkout·외부 action 없이 GitHub REST API로 고정 파일만 갱신하며 수집 Secret·주소·결과에는 접근하지 않는다. `COLLECTION_ENABLED=true`일 때만 동작하고 최대 실행 시간은 3분이다.
+
+월 1회 실행은 무활동 중지를 예방하는 최소 유지 작업이다. 수집 규칙·코드·workflow를 수정하지 않으며 maintenance 커밋으로 추가 workflow를 실행하도록 push/PR trigger를 구성하지 않는다. 예약 지연·실패나 권한 변경으로 장기간 유지 작업이 실행되지 않으면 자동 중지를 완전히 보장해 막을 수 없으며, 이미 중지된 workflow는 GitHub에서 다시 활성화해야 한다.
+
 ## 번들 계약
 
 다운로드는 Secret의 HTTPS 주소로만 인증 GET을 수행한다. redirect를 따르지 않으며 실제 응답 주소도 요청 주소와 같아야 한다. 응답은 `Content-Type: application/javascript`만 허용하고 charset 매개변수는 허용한다. 실제 다운로드 본문을 **256 KiB**로 제한하며 `Content-Length`만 믿지 않는다. 승인된 SHA-256과 정확히 일치해야 실행한다. Secret 누락·잘못된 주소·다른 MIME·빈 본문·크기 초과·해시 불일치·통신 실패는 모두 실패 종료한다.
