@@ -1,0 +1,38 @@
+name: Browser collection runner
+on:
+  schedule:
+    - cron: '17 0,6,12,18 * * *'
+  workflow_dispatch:
+    inputs:
+      max_navigations:
+        description: 'Maximum navigations, 1-300'
+        type: number
+        default: 300
+permissions:
+  contents: read
+concurrency:
+  group: browser-collection-runner
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.repository == 'dnwhdnwh/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify runner and browser
+        run: |
+          npm test
+          google-chrome --version
+      - name: Execute verified private bundle
+        env:
+          COLLECTOR_BOOTSTRAP_URL: ${{ secrets.COLLECTOR_BOOTSTRAP_URL }}
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          COLLECTOR_BUNDLE_SHA256: ${{ secrets.COLLECTOR_BUNDLE_SHA256 }}
+          MAX_NAVIGATIONS: ${{ inputs.max_navigations }}
+        run: node runner.mjs --max-navigations "${MAX_NAVIGATIONS:-300}"

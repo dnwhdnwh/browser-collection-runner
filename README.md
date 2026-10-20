@@ -1,0 +1,63 @@
+# Browser collection runner
+
+비공개 번들을 검증하고 실행하는 공통 실행기다. 이 저장소는 개별 사이트 주소·수집 규칙·대상 목록·서비스 구현·사용자 데이터를 포함하지 않는다.
+
+## 설정
+
+Node.js 22 이상과 표준 Ubuntu 환경을 사용한다. npm 설치 의존성은 없다. GitHub 저장소 이름은 `dnwhdnwh/browser-collection-runner`이며 fork나 다른 이름에서는 job을 실행하지 않는다.
+
+다음 세 값을 GitHub Actions Secrets에 등록한다.
+
+- `COLLECTOR_BOOTSTRAP_URL`: 인증 GET으로 단일 JavaScript 번들을 제공하는 HTTPS 주소
+- `COLLECTOR_TOKEN`: 번들 다운로드 및 비공개 실행에 사용하는 전용 토큰, 최소 32자
+- `COLLECTOR_BUNDLE_SHA256`: 승인한 번들 원문 바이트의 SHA-256, 소문자 16진수 64자리
+
+세 Secret은 실제 실행 단계에만 주입한다. checkout·테스트에는 전달하지 않는다. 주소·토큰·해시를 workflow 입력이나 공개 파일에 적지 않는다. Actions variable `COLLECTION_ENABLED`가 문자열 `true`일 때만 실행하며 기본은 비활성이다. 중지하려면 이 변수를 제거하거나 `false`로 바꾼다.
+
+매일 UTC 00:17·06:17·12:17·18:17에 예약하며 GitHub 사정에 따라 지연·누락될 수 있다. 수동 실행 입력은 `max_navigations` 하나이며 1~300, 기본 300이다. 대상 이름을 입력하는 기능은 제공하지 않는다. 동시 실행은 한 개이며 실행 중인 job을 자동 취소하지 않는다.
+
+```sh
+npm test
+# 세 Secret이 안전한 실행 환경에 등록된 경우
+node runner.mjs --max-navigations 300
+```
+
+## 번들 계약
+
+다운로드는 Secret의 HTTPS 주소로만 인증 GET을 수행한다. redirect를 따르지 않으며 실제 응답 주소도 요청 주소와 같아야 한다. 응답은 `Content-Type: application/javascript`만 허용하고 charset 매개변수는 허용한다. 실제 다운로드 본문을 **256 KiB**로 제한하며 `Content-Length`만 믿지 않는다. 승인된 SHA-256과 정확히 일치해야 실행한다. Secret 누락·잘못된 주소·다른 MIME·빈 본문·크기 초과·해시 불일치·통신 실패는 모두 실패 종료한다.
+
+번들은 외부 파일 없이 실행 가능한 단일 ES 모듈로 다음 함수를 내보낸다.
+
+```js
+export async function execute({token, maxNavigations, runId}) {
+  // 비공개 동작은 승인한 번들 안에서 수행
+  return {summary: {status: 'completed', navigations: 0}, exitCode: 0};
+}
+```
+
+`runId`는 `github-숫자-숫자` 또는 `local-숫자` 형식으로만 전달한다. `maxNavigations`는 실행 요청의 상한이며 실제 예약·재시도·수집 정책은 승인 번들이 책임진다. 번들의 안전한 변경도 해시 Secret을 함께 갱신해야 실행된다.
+
+## 공개 출력과 임시 파일
+
+실행기는 다운로드 전에 부모 환경에서 세 Secret을 모두 제거한다. 검증한 번들은 권한 **0700**인 OS 임시 디렉터리에 권한 **0600** 파일로 저장한다. 별도 Node 자식 프로세스에서 import하며 토큰과 실행 인자는 환경·명령행 대신 IPC로 전달한다. 자식 환경은 실행에 필요한 경로·로케일 등 허용 목록으로 제한한다. 자식 stdout·stderr는 버리며 번들의 console 출력·원문 오류·스택·주소·소스를 공개 로그로 보내지 않는다.
+
+자식이 반환한 결과도 그대로 출력하지 않는다. 다음 고정 필드에 대해 음수가 아닌 안전한 정수, boolean, 고정 상태만 허용한다.
+
+- 상태: `completed`, `attention_required`, `partial_failure`, 또는 검증 실패를 뜻하는 `failed`
+- 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`
+- boolean: `budgetReserved`, `timeBudgetExhausted`
+- `coverage`의 정수: `targetCount`, `fresh`, `stale`, `missingOrUnknown`, `checkedWithin14Days`, `neverAttempted`, `estimatedSweepPages`, `estimatedSweepDays`. boolean: `capacityInsufficient`
+
+실행 오류는 원문 대신 고정 `runner_failed`와 종료 코드 1로 표시한다. 유효한 번들 결과의 `exitCode:1`도 실패로 유지한다. 성공 상태는 번들의 개별 동작 성공 여부를 별도로 증명하지 않으므로 허용된 집계 수치를 함께 확인한다.
+
+성공·예외·시간 초과·처리 가능한 종료 신호에서 임시 파일을 정리한다. 자식 실행은 최대 110분, job 전체는 120분으로 제한한다. 강제 종료처럼 프로세스가 정리 코드를 실행할 수 없는 경우 임시 데이터 제거는 runner 환경의 수명에 따른다. artifact·cache·파일 업로드·push/PR 실행은 구성하지 않는다.
+
+이 방식은 **승인한 해시의 번들을 신뢰하는 실행 경계**다. 임의 악성 코드를 차단하는 sandbox나 서버 운영자·저장소 관리자·runner 관리자에 대한 비밀 보장으로 해석하면 안 된다. 번들의 접근 권한과 배포 검토는 비공개 운영 측에서 관리한다.
+
+## 실행 비용과 검증
+
+공개 저장소의 표준 `ubuntu-latest` GitHub 호스팅 runner 무료 실행 범위만 전제한다. 유료·대형 runner, 외부 유료 서비스, 결제·예산 변경은 구성하지 않는다. 공개 여부나 GitHub 정책·계정 조건이 달라지면 실행 조건을 재확인한다. 이 실행기 자체는 특정 사이트 접근이나 정해진 수집량 확보를 보장하지 않는다.
+
+`npm test`는 합성 모듈과 예약 도메인만 사용해 다운로드 인증·크기·MIME·해시·redirect·Secret 제거·IPC 실행·출력 제한·임시 파일 정리·workflow 경계를 검증한다. 실제 비공개 서비스와의 통신이나 사이트 수집은 테스트하지 않는다.
+
+별도 라이선스를 부여하지 않았다. 공개 열람과 코드 사용·재배포 허가는 별개다.
