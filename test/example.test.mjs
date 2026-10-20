@@ -8,7 +8,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {MAX_BUNDLE_BYTES,takeSecrets,validateSecrets,downloadBundle} from '../lib/bootstrap.mjs';
 import {executeBundle,safeSummary,cleanEnvironment} from '../lib/execute.mjs';
-import {navigationLimit,safeRunId} from '../runner.mjs';
+import {navigationLimit,safeRunId,writeCatchUpOutput} from '../runner.mjs';
 const endpoint='https://example.test/bootstrap',token='synthetic-token-'.repeat(3);
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const source=Buffer.from("export async function execute(){return {summary:{status:'completed',navigations:1},exitCode:0};}");
@@ -50,8 +50,8 @@ test('upstream error text is replaced by a fixed safe error',async()=>{
  await assert.rejects(downloadBundle(config(),{fetcher:async()=>{throw Error(token+' '+endpoint+' RAW_SOURCE');}}),e=>e.message==='download_failed');
 });
 test('public execution accepts only navigation cap and validated run IDs',()=>{
- assert.equal(navigationLimit([]),300);assert.equal(navigationLimit(['--max-navigations','1']),1);
- for(const args of [['--max-navigations','0'],['--max-navigations','301'],['--max-navigations','1.5'],['--name','private'],['--url',endpoint]])assert.throws(()=>navigationLimit(args));
+ assert.equal(navigationLimit([]),900);assert.equal(navigationLimit(['--max-navigations','1']),1);
+ for(const args of [['--max-navigations','0'],['--max-navigations','901'],['--max-navigations','1.5'],['--name','private'],['--url',endpoint]])assert.throws(()=>navigationLimit(args));
  assert.equal(safeRunId({GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'2'}),'github-123-2');assert.match(safeRunId({}),/^local-[0-9]+$/);assert.throws(()=>safeRunId({GITHUB_RUN_ID:token}));
 });
 test('child environment includes only operational allowlist and no Secrets or NODE_OPTIONS',()=>{
@@ -89,7 +89,7 @@ test('missing Secrets fail with a fixed message and empty stdout',()=>{
  const r=spawnSync(process.execPath,['runner.mjs'],{cwd:fileURLToPath(new URL('..',import.meta.url)),env:{PATH:process.env.PATH},encoding:'utf8'});assert.equal(r.status,1);assert.equal(r.stderr.trim(),'runner_failed');assert.equal(r.stdout,'');
 });
 test('workflow has only navigation input and execution-only Secrets without uploads or PR/push triggers',async()=>{
- const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');assert.match(y,/timeout-minutes: 120/);assert.match(y,/persist-credentials: false/);assert.match(y,/vars.COLLECTION_ENABLED == 'true'/);assert.match(y,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.match(y,/17 0,6,12,18 \* \* \*/);assert.match(y,/node-version: '22'/);assert.match(y,/cancel-in-progress: false/);assert.ok(!/upload-artifact|actions\/cache|pull_request|push:|\n      name:/.test(y));
+ const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');assert.match(y,/timeout-minutes: 120/);assert.match(y,/persist-credentials: false/);assert.match(y,/vars.COLLECTION_ENABLED == 'true'/);assert.match(y,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.ok(y.includes("- cron: '17 */2 * * *'"));assert.match(y,/node-version: '22'/);assert.match(y,/cancel-in-progress: false/);assert.ok(!/upload-artifact|actions\/cache|pull_request|push:|\n      name:/.test(y));
  const [before,execute]=y.split('      - name: Execute verified private bundle');assert.ok(!before.includes('secrets.'));for(const key of ['COLLECTOR_BOOTSTRAP_URL','COLLECTOR_TOKEN','COLLECTOR_BUNDLE_SHA256'])assert.equal((execute.match(new RegExp('secrets\\.'+key,'g'))||[]).length,1);
 });
 
@@ -158,4 +158,46 @@ test('browser preflight closes after evaluation or parsing failure and reports c
 test('browser preflight supports JSON-encoded document results and spawn failures',async()=>{
  const {browserSmoke}=await import('../browser-smoke.mjs');await browserSmoke({command:async args=>({status:0,stdout:JSON.stringify(args[0]==='run-code'?{result:JSON.stringify({url:'about:blank'})}:{})})});
  const calls=[];await assert.rejects(browserSmoke({command:async args=>{calls.push(args[0]);return args[0]==='open'?{status:null,error:Error('synthetic-spawn-error')}:{status:0,stdout:'{}'};}}),/synthetic-spawn-error/);assert.deepEqual(calls,['open','close']);
+});
+
+test('navigation requests and isolated bundle defaults allow up to 900 only',async()=>withTemp(async tempParent=>{
+ assert.equal(navigationLimit(['--max-navigations','900']),900);assert.throws(()=>navigationLimit(['--max-navigations','901']));
+ const fixture=Buffer.from("export async function execute({maxNavigations}){return {summary:{status:'completed',navigations:maxNavigations},exitCode:0};}");
+ const result=await executeBundle(fixture,{token,tempParent});assert.equal(result.summary.navigations,900);
+ await assert.rejects(executeBundle(fixture,{token,tempParent,maxNavigations:901}));assert.deepEqual(await readdir(tempParent),[]);
+}));
+test('coverage progress, deadline and recovery fields use strict public numeric and boolean types',()=>{
+ const counts=['dueSoon','overdue','remainingPages','remainingCapacity14Days','remainingDailyCapacity','pagesPerRun','scheduledRunsPerDay','backoffPastDeadline'];
+ const flags=['deadlineMissRisk','allTargetsChecked','allPricesFresh'];
+ const summary=safeSummary({status:'completed',remainingEligibleTargets:7,checkpointCount:2,sourceBackoffActive:false,needsCatchUp:true,coverage:{...Object.fromEntries(counts.map((k,i)=>[k,i])),...Object.fromEntries(flags.map(k=>[k,true]))}});
+ for(const [i,key] of counts.entries())assert.equal(summary.coverage[key],i);for(const key of flags)assert.equal(summary.coverage[key],true);assert.equal(summary.remainingEligibleTargets,7);assert.equal(summary.checkpointCount,2);assert.equal(summary.sourceBackoffActive,false);assert.equal(summary.needsCatchUp,true);
+ for(const invalid of [token,-1,1.5,Number.MAX_SAFE_INTEGER+1,NaN,{},[]]){const r=safeSummary({status:'completed',remainingEligibleTargets:invalid,checkpointCount:invalid,sourceBackoffActive:invalid,needsCatchUp:invalid,coverage:{...Object.fromEntries(counts.map(k=>[k,invalid])),...Object.fromEntries(flags.map(k=>[k,invalid]))}});assert.deepEqual(r,{status:'completed',coverage:{}});}
+});
+test('GITHUB_OUTPUT contains one fixed boolean line and never the raw bundle result',async()=>withTemp(async parent=>{
+ const output=path.join(parent,'output');for(const needsCatchUp of [true,false,undefined,'true','true\nunsafe=value',1,{},[]])writeCatchUpOutput({needsCatchUp,raw:token},output);
+ const body=await readFile(output,'utf8');assert.equal(body,'needs_catch_up=true\n'+'needs_catch_up=false\n'.repeat(7));assert.ok(!body.includes(token));
+}));
+test('IPC execution preserves only true boolean recovery signals and removes unapproved data',async()=>withTemp(async tempParent=>{
+ for(const needsCatchUp of [true,'true',{value:true}]){const value={summary:{status:'completed',needsCatchUp,sourceBackoffActive:false,remainingEligibleTargets:3,raw:token},exitCode:0};const r=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(value)+';}'),{token,tempParent});assert.equal(r.summary.needsCatchUp,needsCatchUp===true?true:undefined);assert.equal(r.summary.raw,undefined);assert.equal(r.summary.sourceBackoffActive,false);}
+}));
+test('follow-up dispatch is gated by successful collect and isolated from collection credentials',async()=>{
+ const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8'),[collect,follow]=y.split('  follow_up:\n');
+ assert.match(collect,/collect:\n    permissions:\n      contents: read/);assert.match(collect,/needs_catch_up: \$\{\{ steps.run.outputs.needs_catch_up \}\}/);assert.match(collect,/name: Execute verified private bundle\n        id: run/);assert.ok(!collect.includes('actions: write'));assert.ok(y.includes("- cron: '17 */2 * * *'"));assert.match(collect,/default: 900/);
+ assert.match(follow,/needs: collect/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/needs.collect.outputs.needs_catch_up == 'true'/);assert.match(follow,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.match(follow,/vars.COLLECTION_ENABLED == 'true'/);assert.match(follow,/permissions:\n      actions: write/);assert.match(follow,/timeout-minutes: 2/);assert.match(follow,/GH_TOKEN: \$\{\{ github.token \}\}/);assert.match(follow,/AbortSignal.timeout\(15000\)/);assert.ok(!/secrets\.|COLLECTOR_|uses:|contents:|inputs\.name|upload-artifact|cache|pull_request|push:/.test(follow));
+});
+async function invokeFollowUp(fetcher,{token='synthetic-follow-up-token'}={}){
+ const workflow=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8'),follow=workflow.split('  follow_up:\n')[1];
+ const script=follow.match(/node <<'NODE'\n([\s\S]*?)\n          NODE/)[1].split('\n').map(line=>line.slice(10)).join('\n');
+ const state={env:token===null?{}:{GH_TOKEN:token}},stdout=[],stderr=[],calls=[];
+ const execute=new Function('fetch','process','console','AbortSignal','return '+script);
+ await execute(async(url,options)=>{assert.equal(state.env.GH_TOKEN,undefined);calls.push({url,options});return fetcher(url,options);},state,{log:v=>stdout.push(v),error:v=>stderr.push(v)},AbortSignal);
+ return {stdout,stderr,calls,exitCode:state.exitCode||0};
+}
+test('follow-up sends one fixed main dispatch with cap 900 and ignores response payload',async()=>{
+ for(const status of [200,204]){const r=await invokeFollowUp(async()=>({status,json:()=>assert.fail('response payload must remain unread')}));assert.equal(r.exitCode,0);assert.deepEqual(r.stdout,['follow_up_requested']);assert.deepEqual(r.stderr,[]);assert.equal(r.calls.length,1);const {url,options}=r.calls[0];assert.equal(url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches');assert.equal(options.method,'POST');assert.equal(options.redirect,'error');assert.deepEqual(JSON.parse(options.body),{ref:'main',inputs:{max_navigations:'900'}});}
+});
+test('follow-up never retries API errors and exposes only fixed failure messages',async()=>{
+ for(const status of [202,302,401,403,404,409,429,500]){const r=await invokeFollowUp(async()=>({status}));assert.equal(r.exitCode,1);assert.equal(r.calls.length,1);assert.deepEqual(r.stderr,['follow_up_failed']);assert.deepEqual(r.stdout,[]);}
+ const r=await invokeFollowUp(async()=>{throw Error(token);});assert.equal(r.exitCode,1);assert.deepEqual(r.stderr,['follow_up_failed']);assert.deepEqual(r.stdout,[]);
+ const missing=await invokeFollowUp(()=>assert.fail('API called without builtin token'),{token:null});assert.equal(missing.exitCode,1);assert.equal(missing.calls.length,0);
 });
