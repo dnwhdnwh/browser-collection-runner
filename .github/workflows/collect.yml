@@ -19,6 +19,7 @@ jobs:
       contents: read
     outputs:
       needs_catch_up: ${{ steps.run.outputs.needs_catch_up }}
+      retry_delay_seconds: ${{ steps.run.outputs.retry_delay_seconds }}
     if: github.repository == 'dnwhdnwh/browser-collection-runner' && vars.COLLECTION_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -50,18 +51,22 @@ jobs:
     permissions:
       actions: write
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 15
     steps:
       - name: Request one follow-up execution
         env:
           GH_TOKEN: ${{ github.token }}
+          RETRY_DELAY_SECONDS: ${{ needs.collect.outputs.retry_delay_seconds }}
         run: |
           node <<'NODE'
           (async()=>{
             const token=process.env.GH_TOKEN;
             delete process.env.GH_TOKEN;
+            const delay=process.env.RETRY_DELAY_SECONDS;
+            delete process.env.RETRY_DELAY_SECONDS;
             try{
-              if(!token)throw Error('follow_up_failed');
+              if(!token||!['0','600'].includes(delay))throw Error('follow_up_failed');
+              if(delay==='600')await new Promise(resolve=>setTimeout(resolve,600000));
               const response=await fetch('https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},redirect:'error',signal:AbortSignal.timeout(15000),body:JSON.stringify({ref:'main',inputs:{max_navigations:'900'}})});
               if(![200,204].includes(response.status))throw Error('follow_up_failed');
               console.log('follow_up_requested');

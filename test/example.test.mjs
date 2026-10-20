@@ -173,9 +173,9 @@ test('coverage progress, deadline and recovery fields use strict public numeric 
  for(const [i,key] of counts.entries())assert.equal(summary.coverage[key],i);for(const key of flags)assert.equal(summary.coverage[key],true);assert.equal(summary.remainingEligibleTargets,7);assert.equal(summary.checkpointCount,2);assert.equal(summary.sourceBackoffActive,false);assert.equal(summary.needsCatchUp,true);
  for(const invalid of [token,-1,1.5,Number.MAX_SAFE_INTEGER+1,NaN,{},[]]){const r=safeSummary({status:'completed',remainingEligibleTargets:invalid,checkpointCount:invalid,sourceBackoffActive:invalid,needsCatchUp:invalid,coverage:{...Object.fromEntries(counts.map(k=>[k,invalid])),...Object.fromEntries(flags.map(k=>[k,invalid]))}});assert.deepEqual(r,{status:'completed',coverage:{}});}
 });
-test('GITHUB_OUTPUT contains one fixed boolean line and never the raw bundle result',async()=>withTemp(async parent=>{
+test('GITHUB_OUTPUT contains only fixed boolean and retry-delay lines without raw bundle data',async()=>withTemp(async parent=>{
  const output=path.join(parent,'output');for(const needsCatchUp of [true,false,undefined,'true','true\nunsafe=value',1,{},[]])writeCatchUpOutput({needsCatchUp,raw:token},output);
- const body=await readFile(output,'utf8');assert.equal(body,'needs_catch_up=true\n'+'needs_catch_up=false\n'.repeat(7));assert.ok(!body.includes(token));
+ const body=await readFile(output,'utf8');assert.equal(body,'needs_catch_up=true\nretry_delay_seconds=0\n'+('needs_catch_up=false\nretry_delay_seconds=0\n').repeat(7));assert.ok(!body.includes(token));
 }));
 test('IPC execution preserves only true boolean recovery signals and removes unapproved data',async()=>withTemp(async tempParent=>{
  for(const needsCatchUp of [true,'true',{value:true}]){const value={summary:{status:'completed',needsCatchUp,sourceBackoffActive:false,remainingEligibleTargets:3,raw:token},exitCode:0};const r=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(value)+';}'),{token,tempParent});assert.equal(r.summary.needsCatchUp,needsCatchUp===true?true:undefined);assert.equal(r.summary.raw,undefined);assert.equal(r.summary.sourceBackoffActive,false);}
@@ -183,15 +183,15 @@ test('IPC execution preserves only true boolean recovery signals and removes una
 test('follow-up dispatch is gated by successful collect and isolated from collection credentials',async()=>{
  const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8'),[collect,follow]=y.split('  follow_up:\n');
  assert.match(collect,/collect:\n    permissions:\n      contents: read/);assert.match(collect,/needs_catch_up: \$\{\{ steps.run.outputs.needs_catch_up \}\}/);assert.match(collect,/name: Execute verified private bundle\n        id: run/);assert.ok(!collect.includes('actions: write'));assert.ok(y.includes("- cron: '17 */2 * * *'"));assert.match(collect,/default: 900/);
- assert.match(follow,/needs: collect/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/needs.collect.outputs.needs_catch_up == 'true'/);assert.match(follow,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.match(follow,/vars.COLLECTION_ENABLED == 'true'/);assert.match(follow,/permissions:\n      actions: write/);assert.match(follow,/timeout-minutes: 2/);assert.match(follow,/GH_TOKEN: \$\{\{ github.token \}\}/);assert.match(follow,/AbortSignal.timeout\(15000\)/);assert.ok(!/secrets\.|COLLECTOR_|uses:|contents:|inputs\.name|upload-artifact|cache|pull_request|push:/.test(follow));
+ assert.match(follow,/needs: collect/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/needs.collect.outputs.needs_catch_up == 'true'/);assert.match(follow,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.match(follow,/vars.COLLECTION_ENABLED == 'true'/);assert.match(follow,/permissions:\n      actions: write/);assert.match(follow,/timeout-minutes: 15/);assert.match(follow,/GH_TOKEN: \$\{\{ github.token \}\}/);assert.match(follow,/AbortSignal.timeout\(15000\)/);assert.ok(!/secrets\.|COLLECTOR_|uses:|contents:|inputs\.name|upload-artifact|cache|pull_request|push:/.test(follow));
 });
-async function invokeFollowUp(fetcher,{token='synthetic-follow-up-token'}={}){
+async function invokeFollowUp(fetcher,{token='synthetic-follow-up-token',retryDelay='0'}={}){
  const workflow=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8'),follow=workflow.split('  follow_up:\n')[1];
  const script=follow.match(/node <<'NODE'\n([\s\S]*?)\n          NODE/)[1].split('\n').map(line=>line.slice(10)).join('\n');
- const state={env:token===null?{}:{GH_TOKEN:token}},stdout=[],stderr=[],calls=[];
- const execute=new Function('fetch','process','console','AbortSignal','return '+script);
- await execute(async(url,options)=>{assert.equal(state.env.GH_TOKEN,undefined);calls.push({url,options});return fetcher(url,options);},state,{log:v=>stdout.push(v),error:v=>stderr.push(v)},AbortSignal);
- return {stdout,stderr,calls,exitCode:state.exitCode||0};
+ const state={env:{RETRY_DELAY_SECONDS:retryDelay,...(token===null?{}:{GH_TOKEN:token})}},stdout=[],stderr=[],calls=[],delays=[],events=[];
+ const execute=new Function('fetch','process','console','AbortSignal','setTimeout','return '+script);
+ await execute(async(url,options)=>{assert.equal(state.env.GH_TOKEN,undefined);assert.equal(state.env.RETRY_DELAY_SECONDS,undefined);events.push('fetch');calls.push({url,options});return fetcher(url,options);},state,{log:v=>stdout.push(v),error:v=>stderr.push(v)},AbortSignal,(resolve,ms)=>{assert.equal(state.env.GH_TOKEN,undefined);assert.equal(state.env.RETRY_DELAY_SECONDS,undefined);events.push('delay');delays.push(ms);resolve();});
+ return {stdout,stderr,calls,delays,events,exitCode:state.exitCode||0};
 }
 test('follow-up sends one fixed main dispatch with cap 900 and ignores response payload',async()=>{
  for(const status of [200,204]){const r=await invokeFollowUp(async()=>({status,json:()=>assert.fail('response payload must remain unread')}));assert.equal(r.exitCode,0);assert.deepEqual(r.stdout,['follow_up_requested']);assert.deepEqual(r.stderr,[]);assert.equal(r.calls.length,1);const {url,options}=r.calls[0];assert.equal(url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches');assert.equal(options.method,'POST');assert.equal(options.redirect,'error');assert.deepEqual(JSON.parse(options.body),{ref:'main',inputs:{max_navigations:'900'}});}
@@ -200,4 +200,27 @@ test('follow-up never retries API errors and exposes only fixed failure messages
  for(const status of [202,302,401,403,404,409,429,500]){const r=await invokeFollowUp(async()=>({status}));assert.equal(r.exitCode,1);assert.equal(r.calls.length,1);assert.deepEqual(r.stderr,['follow_up_failed']);assert.deepEqual(r.stdout,[]);}
  const r=await invokeFollowUp(async()=>{throw Error(token);});assert.equal(r.exitCode,1);assert.deepEqual(r.stderr,['follow_up_failed']);assert.deepEqual(r.stdout,[]);
  const missing=await invokeFollowUp(()=>assert.fail('API called without builtin token'),{token:null});assert.equal(missing.exitCode,1);assert.equal(missing.calls.length,0);
+});
+
+test('retry delay permits only numeric zero or 600 seconds in public summaries',()=>{
+ for(const retryDelaySeconds of [0,600])assert.equal(safeSummary({status:'partial_failure',retryDelaySeconds}).retryDelaySeconds,retryDelaySeconds);
+ for(const retryDelaySeconds of [1,599,601,-1,'0','600',true,null,{},[],NaN])assert.equal(safeSummary({status:'partial_failure',retryDelaySeconds}).retryDelaySeconds,undefined);
+});
+test('GitHub retry output uses only fixed 0 or 600 with no raw value interpolation',async()=>withTemp(async parent=>{
+ const output=path.join(parent,'output');for(const retryDelaySeconds of [600,0,'600','600\nunsafe=value',601,{},undefined])writeCatchUpOutput({needsCatchUp:true,retryDelaySeconds},output);
+ const lines=(await readFile(output,'utf8')).trim().split('\n');assert.equal(lines.length,14);assert.equal(lines[1],'retry_delay_seconds=600');for(let i=0;i<7;i++){assert.equal(lines[i*2],'needs_catch_up=true');assert.equal(lines[i*2+1],i===0?'retry_delay_seconds=600':'retry_delay_seconds=0');}
+}));
+test('successful recovery scheduling preserves partial failure and delayed follow-up without masking real failures',async()=>withTemp(async tempParent=>{
+ const recovery={summary:{status:'partial_failure',needsCatchUp:true,retryDelaySeconds:600},exitCode:0};
+ const result=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(recovery)+';}'),{token,tempParent});assert.deepEqual(result,recovery);
+ const failure={summary:{status:'partial_failure',needsCatchUp:false,retryDelaySeconds:0},exitCode:1};
+ const failed=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(failure)+';}'),{token,tempParent});assert.deepEqual(failed,failure);
+}));
+test('follow-up waits exactly ten minutes only for the validated 600 setting after clearing token environment',async()=>{
+ const delayed=await invokeFollowUp(async()=>({status:204}),{retryDelay:'600'});assert.equal(delayed.exitCode,0);assert.deepEqual(delayed.delays,[600000]);assert.deepEqual(delayed.events,['delay','fetch']);
+ const immediate=await invokeFollowUp(async()=>({status:204}),{retryDelay:'0'});assert.equal(immediate.exitCode,0);assert.deepEqual(immediate.delays,[]);assert.deepEqual(immediate.events,['fetch']);
+ for(const retryDelay of ['',null,'0600','600.0','601','600\nunsafe=value',600]){const invalid=await invokeFollowUp(()=>assert.fail('invalid retry input dispatched'),{retryDelay});assert.equal(invalid.exitCode,1);assert.equal(invalid.calls.length,0);assert.deepEqual(invalid.delays,[]);assert.deepEqual(invalid.stderr,['follow_up_failed']);}
+});
+test('delayed follow-up output and timeout are wired without adding other job permissions',async()=>{
+ const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');assert.match(y,/retry_delay_seconds: \$\{\{ steps.run.outputs.retry_delay_seconds \}\}/);const follow=y.split('  follow_up:\n')[1];assert.match(follow,/RETRY_DELAY_SECONDS: \$\{\{ needs.collect.outputs.retry_delay_seconds \}\}/);assert.match(follow,/timeout-minutes: 15/);assert.match(follow,/\['0','600'\]\.includes\(delay\)/);assert.match(follow,/setTimeout\(resolve,600000\)/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/actions: write/);assert.ok(!/contents:|secrets\.|COLLECTOR_/.test(follow));
 });

@@ -9,7 +9,7 @@ export function navigationLimit(args){
  const limit=Number(args[1]);if(!Number.isInteger(limit)||limit<1||limit>900)throw Error('configuration_invalid');return limit;
 }
 export function writeCatchUpOutput(summary,outputPath=process.env.GITHUB_OUTPUT){
- if(outputPath)fs.appendFileSync(outputPath,'needs_catch_up='+(summary?.needsCatchUp===true?'true':'false')+'\n');
+ if(outputPath)fs.appendFileSync(outputPath,'needs_catch_up='+(summary?.needsCatchUp===true?'true':'false')+'\nretry_delay_seconds='+(summary?.retryDelaySeconds===600?'600':'0')+'\n');
 }
 export function safeRunId(env=process.env){
  if(env.GITHUB_RUN_ID!==undefined){const value='github-'+env.GITHUB_RUN_ID+'-'+(env.GITHUB_RUN_ATTEMPT||'1');if(!/^github-[0-9]+-[0-9]+$/.test(value))throw Error('configuration_invalid');return value;}
