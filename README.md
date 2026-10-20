@@ -53,6 +53,7 @@ export async function execute({token, maxNavigations, runId}) {
 
 - 상태: `completed`, `attention_required`, `partial_failure`, 또는 검증 실패를 뜻하는 `failed`
 - 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`, `remainingEligibleTargets`, `checkpointCount`
+- 재시도 지연: `retryDelaySeconds`는 숫자 `0` 또는 `600`만 허용
 - boolean: `budgetReserved`, `timeBudgetExhausted`, `sourceBackoffActive`, `needsCatchUp`
 - `coverage`의 정수: `targetCount`, `fresh`, `stale`, `missingOrUnknown`, `checkedWithin14Days`, `neverAttempted`, `estimatedSweepPages`, `estimatedSweepDays`, `dueSoon`, `overdue`, `remainingPages`, `remainingCapacity14Days`, `remainingDailyCapacity`, `pagesPerRun`, `scheduledRunsPerDay`, `backoffPastDeadline`. boolean: `capacityInsufficient`, `deadlineMissRisk`, `allTargetsChecked`, `allPricesFresh`
 
@@ -64,11 +65,13 @@ export async function execute({token, maxNavigations, runId}) {
 
 ## 미완료 대상 후속 실행
 
-실행기는 정제된 `needsCatchUp` boolean만 `GITHUB_OUTPUT`의 `needs_catch_up=true|false`로 전달한다. 누락 값·문자열·객체는 false로 취급한다. 수집 job 성공과 true 출력, 정확한 저장소, `COLLECTION_ENABLED=true`가 모두 충족되면 별도 follow-up job이 고정된 같은 workflow의 main 브랜치에 상한 900으로 **후속 실행을 한 번만 요청**한다. GitHub REST API 외의 주소나 대상 입력을 받지 않는다.
+실행기는 정제된 `needsCatchUp` boolean과 `retryDelaySeconds`만 `GITHUB_OUTPUT`에 `needs_catch_up=true|false`, `retry_delay_seconds=0|600`으로 전달한다. boolean 이외의 후속 신호는 false, 허용된 숫자 이외의 지연은 0으로 취급한다. 수집 job 성공과 true 출력, 정확한 저장소, `COLLECTION_ENABLED=true`가 모두 충족되면 별도 follow-up job이 고정된 같은 workflow의 main 브랜치에 상한 900으로 **후속 실행을 한 번만 요청**한다. GitHub REST API 외의 주소나 대상 입력을 받지 않는다.
 
-후속 job에는 `actions: write`만 부여하고, 수집 Secret·checkout·번들을 전달하지 않는다. 수집 job은 `contents: read`, 월간 maintenance는 별도 `contents: write`를 유지한다. 후속 job은 최대 2분, 단일 API 요청은 15초로 제한하며 실패 원문과 응답 본문은 공개하지 않는다.
+후속 job에는 `actions: write`만 부여하고, 수집 Secret·checkout·번들을 전달하지 않는다. 수집 job은 `contents: read`, 월간 maintenance는 별도 `contents: write`를 유지한다. 후속 job은 지연 값을 문자열 `0` 또는 `600`으로 다시 검증하며, `600`이면 **10분을 기다린 뒤 새 실행을 요청**한다. GitHub 토큰 환경 변수는 대기 전에 제거한다. job은 최대 15분, 단일 API 요청은 15초로 제한하며 실패 원문과 응답 본문은 공개하지 않는다.
 
-새 실행도 미완료 상태라면 다시 후속 실행을 요청할 수 있다. **연속 실행 종료의 핵심은 비공개 번들이 강제하는 하루 최대 3,600페이지 예산**이다. 예산 소진·전체 접근 제한 대기·데이터 오류에는 번들이 `needsCatchUp:false`를 반환해야 한다. 공개 실행기 자체는 사이트별 예산과 재시도 상태를 판정하지 않으므로 승인 번들의 해당 정책을 검증해야 한다.
+새 실행도 미완료 상태라면 다시 후속 실행을 요청할 수 있다. **연속 실행 종료의 핵심은 비공개 번들이 강제하는 하루 최대 3,600페이지 예산**이다. 예산을 소진했거나 안전한 재시도 상태를 게시하지 못했으면 번들이 후속 실행을 중단해야 한다. 공개 실행기 자체는 사이트별 예산과 재시도 상태를 판정하지 않으므로 승인 번들의 해당 정책을 검증해야 한다.
+
+브라우저 오류 뒤 재시도 상태 게시가 성공하면 번들은 `status:partial_failure`, `exitCode:0`, `needsCatchUp:true`, `retryDelaySeconds:600`을 반환할 수 있다. 이 종료 코드 0은 **회복 예약 성공**을 뜻하며 수집 성공을 뜻하지 않는다. 게시·revision 충돌 오류의 종료 코드 1은 유지하고 후속 job을 실행하지 않는다.
 
 후속 실행은 누락된 예약이나 미완료 작업을 보충하는 경로다. 현재 concurrency 설정은 같은 그룹에서 실행 중 1개와 대기 중 1개만 유지하며, 새 요청이 들어오면 기존 대기 실행을 교체할 수 있다. 실행 중인 작업은 취소하지 않는다. [GitHub 동시 실행 규칙](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency) 참조.
 
