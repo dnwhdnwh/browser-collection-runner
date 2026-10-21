@@ -224,3 +224,31 @@ test('follow-up waits exactly ten minutes only for the validated 600 setting aft
 test('delayed follow-up output and timeout are wired without adding other job permissions',async()=>{
  const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');assert.match(y,/retry_delay_seconds: \$\{\{ steps.run.outputs.retry_delay_seconds \}\}/);const follow=y.split('  follow_up:\n')[1];assert.match(follow,/RETRY_DELAY_SECONDS: \$\{\{ needs.collect.outputs.retry_delay_seconds \}\}/);assert.match(follow,/timeout-minutes: 15/);assert.match(follow,/\['0','600'\]\.includes\(delay\)/);assert.match(follow,/setTimeout\(resolve,600000\)/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/actions: write/);assert.ok(!/contents:|secrets\.|COLLECTOR_/.test(follow));
 });
+
+test('failure diagnostics allow only the fixed phase and kind codes',()=>{
+ for(const failurePhase of ['bootstrap','reservation','checkpoint','final','browser','none'])assert.deepEqual(safeSummary({status:'partial_failure',failurePhase}),{status:'partial_failure',failurePhase});
+ for(const failureKind of ['none','network_error','request_timeout','resource_exceeded','service_unavailable','rate_limited','revision_conflict','validation_rejected','authentication_failed','payload_too_large','response_invalid','endpoint_invalid','browser_collection_failed','publication_not_confirmed','unexpected_failure'])assert.deepEqual(safeSummary({status:'partial_failure',failureKind}),{status:'partial_failure',failureKind});
+ for(const invalid of [undefined,null,0,true,{},[],['none'],'NONE','network_error\nunsafe=value',token,endpoint,source.toString()])assert.deepEqual(safeSummary({status:'partial_failure',failurePhase:invalid,failureKind:invalid}),{status:'partial_failure'});
+});
+test('failure HTTP status accepts only zero or safe integers from 100 through 599',()=>{
+ for(const failureHttpStatus of [0,100,200,400,599])assert.deepEqual(safeSummary({failureHttpStatus}),{status:'failed',failureHttpStatus});
+ for(const failureHttpStatus of [undefined,null,-1,1,99,600,100.5,Number.MAX_SAFE_INTEGER+1,Infinity,NaN,'0','200',true,{},[],token])assert.deepEqual(safeSummary({failureHttpStatus}),{status:'failed'});
+});
+test('save recovery counts require nonnegative safe integers with no type coercion',()=>{
+ for(const count of [0,1,Number.MAX_SAFE_INTEGER])assert.deepEqual(safeSummary({saveRetryCount:count,recoveredPublicationCount:count}),{status:'failed',saveRetryCount:count,recoveredPublicationCount:count});
+ for(const count of [undefined,null,-1,1.5,Number.MAX_SAFE_INTEGER+1,Infinity,NaN,'0','1',true,{},[],token])assert.deepEqual(safeSummary({saveRetryCount:count,recoveredPublicationCount:count}),{status:'failed'});
+});
+test('IPC diagnostics expose no private domain, target, raw error or response body',async()=>withTemp(async tempParent=>{
+ const privateValues=[endpoint,token,'synthetic-private-target','synthetic-raw-response'];
+ const value={summary:{status:'partial_failure',failurePhase:'checkpoint',failureKind:'request_timeout',failureHttpStatus:0,saveRetryCount:2,recoveredPublicationCount:1,needsCatchUp:true,retryDelaySeconds:600,url:endpoint,target:privateValues[2],rawError:privateValues.join(' '),responseBody:privateValues[3]},exitCode:0};
+ const result=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(value)+';}'),{token,tempParent});
+ assert.deepEqual(result,{summary:{status:'partial_failure',saveRetryCount:2,recoveredPublicationCount:1,failurePhase:'checkpoint',failureKind:'request_timeout',failureHttpStatus:0,retryDelaySeconds:600,needsCatchUp:true},exitCode:0});
+ const serialized=JSON.stringify(result);for(const privateValue of privateValues)assert.ok(!serialized.includes(privateValue));
+ const output=path.join(tempParent,'output');writeCatchUpOutput(result.summary,output);assert.equal(await readFile(output,'utf8'),'needs_catch_up=true\nretry_delay_seconds=600\n');
+ const poisoned={...value,summary:{...value.summary,failurePhase:privateValues.join(' '),failureKind:privateValues.join(' '),failureHttpStatus:token,saveRetryCount:token,recoveredPublicationCount:token}};
+ const rejected=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(poisoned)+';}'),{token,tempParent});assert.deepEqual(rejected,{summary:{status:'partial_failure',retryDelaySeconds:600,needsCatchUp:true},exitCode:0});
+}));
+test('diagnostics cannot override failure exits or boolean recovery gates',async()=>withTemp(async tempParent=>{
+ const value={summary:{status:'partial_failure',failurePhase:'final',failureKind:'revision_conflict',failureHttpStatus:409,saveRetryCount:0,recoveredPublicationCount:0,needsCatchUp:'true',retryDelaySeconds:'600'},exitCode:1};
+ const result=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(value)+';}'),{token,tempParent});assert.equal(result.exitCode,1);assert.equal(result.summary.needsCatchUp,undefined);assert.equal(result.summary.retryDelaySeconds,undefined);assert.equal(result.summary.failureKind,'revision_conflict');
+}));

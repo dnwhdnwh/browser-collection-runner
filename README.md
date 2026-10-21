@@ -52,12 +52,17 @@ export async function execute({token, maxNavigations, runId}) {
 자식이 반환한 결과도 그대로 출력하지 않는다. 다음 고정 필드에 대해 음수가 아닌 안전한 정수, boolean, 고정 상태만 허용한다.
 
 - 상태: `completed`, `attention_required`, `partial_failure`, 또는 검증 실패를 뜻하는 `failed`
-- 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`, `remainingEligibleTargets`, `checkpointCount`
+- 정수: `publishedRevision`, `selectedTargets`, `attemptedTargets`, `navigations`, `dailyReservedNavigations`, `accepted`, `held`, `noOffers`, `remainingEligibleTargets`, `checkpointCount`, `saveRetryCount`, `recoveredPublicationCount`
+- 실패 단계 `failurePhase`: `bootstrap`, `reservation`, `checkpoint`, `final`, `browser`, `none`만 허용
+- 실패 종류 `failureKind`: `none`, `network_error`, `request_timeout`, `resource_exceeded`, `service_unavailable`, `rate_limited`, `revision_conflict`, `validation_rejected`, `authentication_failed`, `payload_too_large`, `response_invalid`, `endpoint_invalid`, `browser_collection_failed`, `publication_not_confirmed`, `unexpected_failure`만 허용
+- 응답 코드 `failureHttpStatus`: 숫자 `0` 또는 `100`~`599`의 안전한 정수만 허용. `0`은 HTTP 응답 코드 미확보를 뜻하며 성공 판정이 아님
 - 재시도 지연: `retryDelaySeconds`는 숫자 `0` 또는 `600`만 허용
 - boolean: `budgetReserved`, `timeBudgetExhausted`, `sourceBackoffActive`, `needsCatchUp`
 - `coverage`의 정수: `targetCount`, `fresh`, `stale`, `missingOrUnknown`, `checkedWithin14Days`, `neverAttempted`, `estimatedSweepPages`, `estimatedSweepDays`, `dueSoon`, `overdue`, `remainingPages`, `remainingCapacity14Days`, `remainingDailyCapacity`, `pagesPerRun`, `scheduledRunsPerDay`, `backoffPastDeadline`. boolean: `capacityInsufficient`, `deadlineMissRisk`, `allTargetsChecked`, `allPricesFresh`
 
 실행 오류는 원문 대신 고정 `runner_failed`와 종료 코드 1로 표시한다. 유효한 번들 결과의 `exitCode:1`도 실패로 유지한다. 성공 상태는 번들의 개별 동작 성공 여부를 별도로 증명하지 않으므로 허용된 집계 수치를 함께 확인한다.
+
+실패 진단은 승인 번들이 반환한 고정 코드만 전달하며 허용 목록 밖의 문자열·숫자 형식은 생략한다. 원문 오류·응답 본문·주소·대상 이름은 출력하지 않는다. `saveRetryCount`는 저장 재시도 횟수, `recoveredPublicationCount`는 오류 뒤 게시 확인으로 복구한 횟수다.
 
 성공·예외·시간 초과·처리 가능한 종료 신호에서 임시 파일을 정리한다. 자식 실행은 최대 110분, job 전체는 120분으로 제한한다. 강제 종료처럼 프로세스가 정리 코드를 실행할 수 없는 경우 임시 데이터 제거는 runner 환경의 수명에 따른다. artifact·cache·파일 업로드·push/PR 실행은 구성하지 않는다.
 
@@ -69,9 +74,9 @@ export async function execute({token, maxNavigations, runId}) {
 
 후속 job에는 `actions: write`만 부여하고, 수집 Secret·checkout·번들을 전달하지 않는다. 수집 job은 `contents: read`, 월간 maintenance는 별도 `contents: write`를 유지한다. 후속 job은 지연 값을 문자열 `0` 또는 `600`으로 다시 검증하며, `600`이면 **10분을 기다린 뒤 새 실행을 요청**한다. GitHub 토큰 환경 변수는 대기 전에 제거한다. job은 최대 15분, 단일 API 요청은 15초로 제한하며 실패 원문과 응답 본문은 공개하지 않는다.
 
-새 실행도 미완료 상태라면 다시 후속 실행을 요청할 수 있다. **연속 실행 종료의 핵심은 비공개 번들이 강제하는 하루 최대 3,600페이지 예산**이다. 예산을 소진했거나 안전한 재시도 상태를 게시하지 못했으면 번들이 후속 실행을 중단해야 한다. 공개 실행기 자체는 사이트별 예산과 재시도 상태를 판정하지 않으므로 승인 번들의 해당 정책을 검증해야 한다.
+새 실행도 미완료 상태라면 다시 후속 실행을 요청할 수 있다. **연속 실행 종료의 핵심은 비공개 번들이 강제하는 하루 최대 3,600페이지 예산**이다. 예산을 소진했거나 안전하게 다시 시작할 수 없으면 번들이 후속 실행을 중단해야 한다. 공개 실행기 자체는 사이트별 예산과 재시도 상태를 판정하지 않으므로 승인 번들의 해당 정책을 검증해야 한다.
 
-브라우저 오류 뒤 재시도 상태 게시가 성공하면 번들은 `status:partial_failure`, `exitCode:0`, `needsCatchUp:true`, `retryDelaySeconds:600`을 반환할 수 있다. 이 종료 코드 0은 **회복 예약 성공**을 뜻하며 수집 성공을 뜻하지 않는다. 게시·revision 충돌 오류의 종료 코드 1은 유지하고 후속 job을 실행하지 않는다.
+브라우저·저장 오류 뒤 승인 번들이 안전한 재개를 요청하면 `status:partial_failure`, `exitCode:0`, `needsCatchUp:true`, `retryDelaySeconds:600`을 반환할 수 있다. 이 종료 코드 0은 **회복 예약 성공**을 뜻하며 수집 성공을 뜻하지 않는다. 이 경우에만 **10분 뒤 새 실행**을 요청하며 원인·단계는 고정 코드로만 출력한다. 저장 재시도와 실제 게시 확인은 승인 번들이 담당하며 실행기가 오류 코드만 보고 저장을 재시도하지 않는다. 번들의 종료 코드 1은 유지하고 후속 job을 실행하지 않는다.
 
 후속 실행은 누락된 예약이나 미완료 작업을 보충하는 경로다. 현재 concurrency 설정은 같은 그룹에서 실행 중 1개와 대기 중 1개만 유지하며, 새 요청이 들어오면 기존 대기 실행을 교체할 수 있다. 실행 중인 작업은 취소하지 않는다. [GitHub 동시 실행 규칙](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency) 참조.
 
