@@ -252,3 +252,8 @@ test('diagnostics cannot override failure exits or boolean recovery gates',async
  const value={summary:{status:'partial_failure',failurePhase:'final',failureKind:'revision_conflict',failureHttpStatus:409,saveRetryCount:0,recoveredPublicationCount:0,needsCatchUp:'true',retryDelaySeconds:'600'},exitCode:1};
  const result=await executeBundle(Buffer.from('export async function execute(){return '+JSON.stringify(value)+';}'),{token,tempParent});assert.equal(result.exitCode,1);assert.equal(result.summary.needsCatchUp,undefined);assert.equal(result.summary.retryDelaySeconds,undefined);assert.equal(result.summary.failureKind,'revision_conflict');
 }));
+
+test('read strategy diagnostics expose only fixed modes and nonnegative integer counts',()=>{
+ for(const readMode of ['selected','full','readiness'])assert.deepEqual(safeSummary({status:'completed',readMode,rawSnapshotTargets:10,planningTargets:923}),{status:'completed',rawSnapshotTargets:10,planningTargets:923,readMode});
+ for(const invalid of [token,endpoint,'selected\nunsafe=value',undefined,null,-1,1.5,NaN,{},[],true,'10'])assert.deepEqual(safeSummary({readMode:invalid,rawSnapshotTargets:invalid,planningTargets:invalid}),{status:'failed'});
+});
