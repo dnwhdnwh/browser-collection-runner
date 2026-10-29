@@ -3,11 +3,20 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {takeSecrets,downloadBundle} from './lib/bootstrap.mjs';
 import {executeBundle} from './lib/execute.mjs';
-export function navigationLimit(args){
- if(args.length===0)return 900;
- if(args.length!==2||args[0]!=='--max-navigations'||!/^\d+$/.test(args[1]))throw Error('configuration_invalid');
- const limit=Number(args[1]);if(!Number.isInteger(limit)||limit<1||limit>900)throw Error('configuration_invalid');return limit;
+export const collectionScopes=Object.freeze(['default','scope_1','scope_2','scope_4','scope_5']);
+export function runnerOptions(args){
+ const options={maxNavigations:900,collectionScope:'default'},seen=new Set();
+ for(let index=0;index<args.length;index+=2){
+  const key=args[index],value=args[index+1];
+  if(seen.has(key)||value===undefined)throw Error('configuration_invalid');seen.add(key);
+  if(key==='--max-navigations'&&/^\d+$/.test(value))options.maxNavigations=Number(value);
+  else if(key==='--collection-scope'&&collectionScopes.includes(value))options.collectionScope=value;
+  else throw Error('configuration_invalid');
+ }
+ if(!Number.isInteger(options.maxNavigations)||options.maxNavigations<1||options.maxNavigations>900)throw Error('configuration_invalid');
+ return options;
 }
+export const navigationLimit=args=>runnerOptions(args).maxNavigations;
 export function writeCatchUpOutput(summary,outputPath=process.env.GITHUB_OUTPUT){
  if(outputPath)fs.appendFileSync(outputPath,'needs_catch_up='+(summary?.needsCatchUp===true?'true':'false')+'\nretry_delay_seconds='+(summary?.retryDelaySeconds===600?'600':'0')+'\n');
 }
@@ -17,10 +26,10 @@ export function safeRunId(env=process.env){
 }
 export async function main(args=process.argv.slice(2)){
  const config=takeSecrets();
- const maxNavigations=navigationLimit(args);
+ const {maxNavigations,collectionScope}=runnerOptions(args);
  const runId=safeRunId();
  const bytes=await downloadBundle(config);
- const result=await executeBundle(bytes,{token:config.token,maxNavigations,runId});
+ const result=await executeBundle(bytes,{token:config.token,maxNavigations,collectionScope,runId});
  writeCatchUpOutput(result.summary);
  const output=JSON.stringify(result.summary)+'\n';
  process.stdout.write(output);
