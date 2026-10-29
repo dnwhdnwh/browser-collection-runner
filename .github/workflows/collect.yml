@@ -1,4 +1,5 @@
 name: Browser collection runner
+run-name: "Collection ${{ inputs.collection_scope || 'default' }}"
 on:
   schedule:
     - cron: '17 */2 * * *'
