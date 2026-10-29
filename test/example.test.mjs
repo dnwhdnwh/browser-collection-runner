@@ -8,7 +8,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {MAX_BUNDLE_BYTES,takeSecrets,validateSecrets,downloadBundle} from '../lib/bootstrap.mjs';
 import {executeBundle,safeSummary,cleanEnvironment} from '../lib/execute.mjs';
-import {navigationLimit,safeRunId,writeCatchUpOutput} from '../runner.mjs';
+import {navigationLimit,runnerOptions,safeRunId,writeCatchUpOutput} from '../runner.mjs';
 const endpoint='https://example.test/bootstrap',token='synthetic-token-'.repeat(3);
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const source=Buffer.from("export async function execute(){return {summary:{status:'completed',navigations:1},exitCode:0};}");
@@ -88,7 +88,7 @@ test('invalid navigation cap or run ID never writes a bundle',async()=>withTemp(
 test('missing Secrets fail with a fixed message and empty stdout',()=>{
  const r=spawnSync(process.execPath,['runner.mjs'],{cwd:fileURLToPath(new URL('..',import.meta.url)),env:{PATH:process.env.PATH},encoding:'utf8'});assert.equal(r.status,1);assert.equal(r.stderr.trim(),'runner_failed');assert.equal(r.stdout,'');
 });
-test('workflow has only navigation input and execution-only Secrets without uploads or PR/push triggers',async()=>{
+test('workflow has bounded navigation/scope inputs and execution-only Secrets without uploads or PR/push triggers',async()=>{
  const y=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8');assert.match(y,/timeout-minutes: 120/);assert.match(y,/persist-credentials: false/);assert.match(y,/vars.COLLECTION_ENABLED == 'true'/);assert.match(y,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.ok(y.includes("- cron: '17 */2 * * *'"));assert.match(y,/node-version: '22'/);assert.match(y,/cancel-in-progress: false/);assert.ok(!/upload-artifact|actions\/cache|pull_request|push:|\n      name:/.test(y));
  const [before,execute]=y.split('      - name: Execute verified private bundle');assert.ok(!before.includes('secrets.'));for(const key of ['COLLECTOR_BOOTSTRAP_URL','COLLECTOR_TOKEN','COLLECTOR_BUNDLE_SHA256'])assert.equal((execute.match(new RegExp('secrets\\.'+key,'g'))||[]).length,1);
 });
@@ -185,16 +185,16 @@ test('follow-up dispatch is gated by successful collect and isolated from collec
  assert.match(collect,/collect:\n    permissions:\n      contents: read/);assert.match(collect,/needs_catch_up: \$\{\{ steps.run.outputs.needs_catch_up \}\}/);assert.match(collect,/name: Execute verified private bundle\n        id: run/);assert.ok(!collect.includes('actions: write'));assert.ok(y.includes("- cron: '17 */2 * * *'"));assert.match(collect,/default: 900/);
  assert.match(follow,/needs: collect/);assert.match(follow,/needs.collect.result == 'success'/);assert.match(follow,/needs.collect.outputs.needs_catch_up == 'true'/);assert.match(follow,/github.repository == 'dnwhdnwh\/browser-collection-runner'/);assert.match(follow,/vars.COLLECTION_ENABLED == 'true'/);assert.match(follow,/permissions:\n      actions: write/);assert.match(follow,/timeout-minutes: 15/);assert.match(follow,/GH_TOKEN: \$\{\{ github.token \}\}/);assert.match(follow,/AbortSignal.timeout\(15000\)/);assert.ok(!/secrets\.|COLLECTOR_|uses:|contents:|inputs\.name|upload-artifact|cache|pull_request|push:/.test(follow));
 });
-async function invokeFollowUp(fetcher,{token='synthetic-follow-up-token',retryDelay='0'}={}){
+async function invokeFollowUp(fetcher,{token='synthetic-follow-up-token',retryDelay='0',collectionScope='default'}={}){
  const workflow=await readFile(new URL('../.github/workflows/collect.yml',import.meta.url),'utf8'),follow=workflow.split('  follow_up:\n')[1];
  const script=follow.match(/node <<'NODE'\n([\s\S]*?)\n          NODE/)[1].split('\n').map(line=>line.slice(10)).join('\n');
- const state={env:{RETRY_DELAY_SECONDS:retryDelay,...(token===null?{}:{GH_TOKEN:token})}},stdout=[],stderr=[],calls=[],delays=[],events=[];
+ const state={env:{RETRY_DELAY_SECONDS:retryDelay,COLLECTION_SCOPE:collectionScope,...(token===null?{}:{GH_TOKEN:token})}},stdout=[],stderr=[],calls=[],delays=[],events=[];
  const execute=new Function('fetch','process','console','AbortSignal','setTimeout','return '+script);
  await execute(async(url,options)=>{assert.equal(state.env.GH_TOKEN,undefined);assert.equal(state.env.RETRY_DELAY_SECONDS,undefined);events.push('fetch');calls.push({url,options});return fetcher(url,options);},state,{log:v=>stdout.push(v),error:v=>stderr.push(v)},AbortSignal,(resolve,ms)=>{assert.equal(state.env.GH_TOKEN,undefined);assert.equal(state.env.RETRY_DELAY_SECONDS,undefined);events.push('delay');delays.push(ms);resolve();});
  return {stdout,stderr,calls,delays,events,exitCode:state.exitCode||0};
 }
 test('follow-up sends one fixed main dispatch with cap 900 and ignores response payload',async()=>{
- for(const status of [200,204]){const r=await invokeFollowUp(async()=>({status,json:()=>assert.fail('response payload must remain unread')}));assert.equal(r.exitCode,0);assert.deepEqual(r.stdout,['follow_up_requested']);assert.deepEqual(r.stderr,[]);assert.equal(r.calls.length,1);const {url,options}=r.calls[0];assert.equal(url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches');assert.equal(options.method,'POST');assert.equal(options.redirect,'error');assert.deepEqual(JSON.parse(options.body),{ref:'main',inputs:{max_navigations:'900'}});}
+ for(const status of [200,204]){const r=await invokeFollowUp(async()=>({status,json:()=>assert.fail('response payload must remain unread')}));assert.equal(r.exitCode,0);assert.deepEqual(r.stdout,['follow_up_requested']);assert.deepEqual(r.stderr,[]);assert.equal(r.calls.length,1);const {url,options}=r.calls[0];assert.equal(url,'https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches');assert.equal(options.method,'POST');assert.equal(options.redirect,'error');assert.deepEqual(JSON.parse(options.body),{ref:'main',inputs:{max_navigations:'900',collection_scope:'default'}});}
 });
 test('follow-up never retries API errors and exposes only fixed failure messages',async()=>{
  for(const status of [202,302,401,403,404,409,429,500]){const r=await invokeFollowUp(async()=>({status}));assert.equal(r.exitCode,1);assert.equal(r.calls.length,1);assert.deepEqual(r.stderr,['follow_up_failed']);assert.deepEqual(r.stdout,[]);}
@@ -256,4 +256,32 @@ test('diagnostics cannot override failure exits or boolean recovery gates',async
 test('read strategy diagnostics expose only fixed modes and nonnegative integer counts',()=>{
  for(const readMode of ['selected','full','readiness'])assert.deepEqual(safeSummary({status:'completed',readMode,rawSnapshotTargets:10,planningTargets:923}),{status:'completed',rawSnapshotTargets:10,planningTargets:923,readMode});
  for(const invalid of [token,endpoint,'selected\nunsafe=value',undefined,null,-1,1.5,NaN,{},[],true,'10'])assert.deepEqual(safeSummary({readMode:invalid,rawSnapshotTargets:invalid,planningTargets:invalid}),{status:'failed'});
+});
+
+
+test('approved opaque scopes are validated without accepting names URLs or duplicate inputs',()=>{
+ assert.deepEqual(runnerOptions([]),{maxNavigations:900,collectionScope:'default'});
+ for(const collectionScope of ['default','scope_1','scope_2','scope_4','scope_5'])assert.deepEqual(runnerOptions(['--collection-scope',collectionScope,'--max-navigations','10']),{maxNavigations:10,collectionScope});
+ for(const args of [['--collection-scope'],['--collection-scope','scope_3'],['--collection-scope',endpoint],['--collection-scope',token],['--collection-scope','default','--collection-scope','scope_1'],['--max-navigations','1','--max-navigations','2']])assert.throws(()=>runnerOptions(args),{message:'configuration_invalid'});
+});
+test('nondefault scopes require bundle capability before calling execute and are passed over private IPC',async()=>withTemp(async tempParent=>{
+ const marker=path.join(tempParent,'unexpected');
+ const old=Buffer.from(`import fs from 'node:fs';export async function execute(){fs.writeFileSync(${JSON.stringify(marker)},'executed');return {summary:{status:'completed'},exitCode:0};}`);
+ await assert.rejects(executeBundle(old,{token,collectionScope:'scope_1',tempParent}),{message:'execution_failed'});
+ assert.deepEqual(await readdir(tempParent),[]);
+ for(const collectionScope of ['scope_1','scope_2','scope_4','scope_5']){
+  const fixture=Buffer.from(`export const collectionScopes=['scope_1','scope_2','scope_4','scope_5'];export async function execute({collectionScope}){if(collectionScope!==${JSON.stringify(collectionScope)})throw Error('wrong_scope');return {summary:{status:'completed',navigations:1},exitCode:0};}`);
+  const result=await executeBundle(fixture,{token,collectionScope,tempParent});assert.equal(result.exitCode,0);
+ }
+ await assert.rejects(executeBundle(source,{token,collectionScope:token,tempParent}),{message:'execution_failed'});
+}));
+test('follow-up preserves the same approved scope and rejects untrusted values before dispatch',async()=>{
+ for(const collectionScope of ['default','scope_1','scope_2','scope_4','scope_5']){
+  const result=await invokeFollowUp(async()=>({status:204}),{collectionScope});
+  assert.equal(result.exitCode,0);assert.equal(JSON.parse(result.calls[0].options.body).inputs.collection_scope,collectionScope);
+ }
+ for(const collectionScope of ['scope_3',token,endpoint,'scope_1\nunsafe=value',{}]){
+  const result=await invokeFollowUp(()=>assert.fail('unsupported scope dispatched'),{collectionScope});
+  assert.equal(result.exitCode,1);assert.equal(result.calls.length,0);assert.deepEqual(result.stderr,['follow_up_failed']);
+ }
 });

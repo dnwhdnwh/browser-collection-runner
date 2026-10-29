@@ -8,6 +8,11 @@ on:
         description: 'Maximum navigations, 1-900'
         type: number
         default: 900
+      collection_scope:
+        description: 'Approved private collection scope'
+        type: choice
+        options: [default, scope_1, scope_2, scope_4, scope_5]
+        default: default
 permissions:
   contents: read
 concurrency:
@@ -42,7 +47,8 @@ jobs:
           COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
           COLLECTOR_BUNDLE_SHA256: ${{ secrets.COLLECTOR_BUNDLE_SHA256 }}
           MAX_NAVIGATIONS: ${{ inputs.max_navigations }}
-        run: node runner.mjs --max-navigations "${MAX_NAVIGATIONS:-900}"
+          COLLECTION_SCOPE: ${{ inputs.collection_scope }}
+        run: node runner.mjs --max-navigations "${MAX_NAVIGATIONS:-900}" --collection-scope "${COLLECTION_SCOPE:-default}"
   follow_up:
     needs: collect
     if: >-
@@ -57,6 +63,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RETRY_DELAY_SECONDS: ${{ needs.collect.outputs.retry_delay_seconds }}
+          COLLECTION_SCOPE: ${{ inputs.collection_scope }}
         run: |
           node <<'NODE'
           (async()=>{
@@ -64,10 +71,12 @@ jobs:
             delete process.env.GH_TOKEN;
             const delay=process.env.RETRY_DELAY_SECONDS;
             delete process.env.RETRY_DELAY_SECONDS;
+            const scope=process.env.COLLECTION_SCOPE||'default';
+            delete process.env.COLLECTION_SCOPE;
             try{
-              if(!token||!['0','600'].includes(delay))throw Error('follow_up_failed');
+              if(!token||!['0','600'].includes(delay)||!['default','scope_1','scope_2','scope_4','scope_5'].includes(scope))throw Error('follow_up_failed');
               if(delay==='600')await new Promise(resolve=>setTimeout(resolve,600000));
-              const response=await fetch('https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},redirect:'error',signal:AbortSignal.timeout(15000),body:JSON.stringify({ref:'main',inputs:{max_navigations:'900'}})});
+              const response=await fetch('https://api.github.com/repos/dnwhdnwh/browser-collection-runner/actions/workflows/collect.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+token,Accept:'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},redirect:'error',signal:AbortSignal.timeout(15000),body:JSON.stringify({ref:'main',inputs:{max_navigations:'900',collection_scope:scope}})});
               if(![200,204].includes(response.status))throw Error('follow_up_failed');
               console.log('follow_up_requested');
             }catch{

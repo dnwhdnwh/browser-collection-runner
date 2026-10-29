@@ -14,7 +14,7 @@ Node.js 22 이상과 표준 Ubuntu 환경을 사용한다. npm 설치 의존성�
 
 세 Secret은 실제 실행 단계에만 주입한다. checkout·테스트에는 전달하지 않는다. 주소·토큰·해시를 workflow 입력이나 공개 파일에 적지 않는다. Actions variable `COLLECTION_ENABLED`가 문자열 `true`일 때만 실행하며 기본은 비활성이다. 중지하려면 이 변수를 제거하거나 `false`로 바꾼다.
 
-매일 UTC 짝수 시각 00:17~22:17, 한국시간 홀수 시각 01:17~23:17에 **하루 12회** 예약하며 GitHub 사정에 따라 지연·누락될 수 있다. 수동 실행 입력은 `max_navigations` 하나이며 1~900, 기본 900이다. 대상 이름을 입력하는 기능은 제공하지 않는다. 동시 실행은 한 개이며 실행 중인 job을 자동 취소하지 않는다.
+매일 UTC 짝수 시각 00:17~22:17, 한국시간 홀수 시각 01:17~23:17에 **하루 12회** 예약하며 GitHub 사정에 따라 지연·누락될 수 있다. 수동 실행은 `max_navigations` 1~900(기본900)과 승인된 비공개 선택 키 `collection_scope`를 받는다. 선택 키는 default/scope_1/scope_2/scope_4/scope_5이며 의미는 비공개 번들이 결정한다. 예약은 default, 후속 실행은 같은 선택 키를 유지한다. 비기본 선택은 번들이 collectionScopes로 지원을 명시한 경우에만 실행한다. 대상 이름이나 URL을 입력하는 기능은 제공하지 않는다. 동시 실행은 한 개이며 실행 중인 job을 자동 취소하지 않는다.
 
 ```sh
 npm test
@@ -37,7 +37,8 @@ GitHub는 공개 저장소에 **60일 동안 활동이 없으면 예약 workflow
 번들은 외부 파일 없이 실행 가능한 단일 ES 모듈로 다음 함수를 내보낸다.
 
 ```js
-export async function execute({token, maxNavigations, runId}) {
+export const collectionScopes = ['default'];
+export async function execute({token, maxNavigations, collectionScope, runId}) {
   // 비공개 동작은 승인한 번들 안에서 수행
   return {summary: {status: 'completed', navigations: 0, needsCatchUp: false}, exitCode: 0};
 }
